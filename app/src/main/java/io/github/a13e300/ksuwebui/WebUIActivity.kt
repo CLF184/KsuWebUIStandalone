@@ -1,10 +1,15 @@
 package io.github.a13e300.ksuwebui
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.app.ActivityManager
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.ViewGroup.MarginLayoutParams
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -12,6 +17,7 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updateLayoutParams
@@ -25,6 +31,28 @@ class WebUIActivity : ComponentActivity(), FileSystemService.Listener {
 
     private lateinit var webView: WebView
     private lateinit var moduleDir: String
+
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+
+    // Ported from the KernelSU manager (GPL-3.0):
+    // WebViewHelper.onShowFileChooser + WebUIScreen.rememberFileLauncher + WebUIState.onFileChooserResult
+    private val fileLauncher = registerForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val uris: Array<Uri>? = if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.let { data ->
+                data.clipData?.let { clipData ->
+                    Array(clipData.itemCount) { i -> clipData.getItemAt(i).uri }
+                } ?: data.data?.let { arrayOf(it) }
+            }
+        } else null
+        onFileChooserResult(uris)
+    }
+
+    private fun onFileChooserResult(uris: Array<Uri>?) {
+        filePathCallback?.onReceiveValue(uris)
+        filePathCallback = null
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // Enable edge to edge
@@ -70,6 +98,28 @@ class WebUIActivity : ComponentActivity(), FileSystemService.Listener {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.allowFileAccess = false
+            // <input type="file"> in module WebUI only works when the host implements
+            // WebChromeClient.onShowFileChooser; otherwise the request is dropped.
+            webChromeClient = object : WebChromeClient() {
+                override fun onShowFileChooser(
+                    webView: WebView?, filePathCallback: ValueCallback<Array<Uri>>?, fileChooserParams: FileChooserParams?
+                ): Boolean {
+                    this@WebUIActivity.filePathCallback?.onReceiveValue(null)
+                    this@WebUIActivity.filePathCallback = filePathCallback
+
+                    val intent = fileChooserParams?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply { type = "*/*" }
+                    if (fileChooserParams?.mode == FileChooserParams.MODE_OPEN_MULTIPLE) {
+                        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                    }
+
+                    try {
+                        fileLauncher.launch(intent)
+                    } catch (_: Exception) {
+                        onFileChooserResult(null)
+                    }
+                    return true
+                }
+            }
             webviewInterface = WebViewInterface(this@WebUIActivity, this, moduleDir)
         }
 

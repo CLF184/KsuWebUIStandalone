@@ -2,9 +2,14 @@ package io.github.a13e300.ksuwebui
 
 import android.annotation.SuppressLint
 import android.app.ActivityManager
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.ViewGroup.MarginLayoutParams
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -12,6 +17,7 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updateLayoutParams
@@ -25,6 +31,18 @@ class WebUIActivity : ComponentActivity(), FileSystemService.Listener {
 
     private lateinit var webView: WebView
     private lateinit var moduleDir: String
+
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+
+    private val fileChooserLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val callback = filePathCallback ?: return@registerForActivityResult
+        filePathCallback = null
+        callback.onReceiveValue(
+            WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+        )
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // Enable edge to edge
@@ -70,6 +88,33 @@ class WebUIActivity : ComponentActivity(), FileSystemService.Listener {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.allowFileAccess = false
+            // WebView silently drops <input type="file"> clicks unless the host app
+            // implements WebChromeClient.onShowFileChooser, so wire it to the
+            // system file picker for module WebUI pages.
+            webChromeClient = object : WebChromeClient() {
+                override fun onShowFileChooser(
+                    webView: WebView,
+                    filePathCallback: ValueCallback<Array<Uri>>,
+                    fileChooserParams: WebChromeClient.FileChooserParams
+                ): Boolean {
+                    this@WebUIActivity.filePathCallback?.onReceiveValue(null)
+                    this@WebUIActivity.filePathCallback = filePathCallback
+
+                    val intent = fileChooserParams.createIntent()
+                    if (fileChooserParams.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
+                        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                    }
+
+                    return try {
+                        fileChooserLauncher.launch(intent)
+                        true
+                    } catch (_: ActivityNotFoundException) {
+                        this@WebUIActivity.filePathCallback = null
+                        filePathCallback.onReceiveValue(null)
+                        false
+                    }
+                }
+            }
             webviewInterface = WebViewInterface(this@WebUIActivity, this, moduleDir)
         }
 
